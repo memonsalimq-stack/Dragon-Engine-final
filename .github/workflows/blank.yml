@@ -1,0 +1,81 @@
+name: Build Dragon Engine APK
+
+# Upload the project ZIP (or the unzipped project) to the repo and commit: the APK is built automatically.
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unpack project ZIP (if the repo only holds a ZIP)
+        run: |
+          if [ -z "$(find . -name gradlew -not -path './.git/*' | head -n 1)" ]; then
+            ZIP=$(find . -maxdepth 3 -iname "*.zip" -not -path './.git/*' -printf "%T@ %p\n" | sort -rn | head -n 1 | cut -d" " -f2-)
+            if [ -z "$ZIP" ]; then echo "No gradlew and no ZIP found in the repo"; exit 1; fi
+            echo "Unpacking $ZIP"
+            mkdir -p _project
+            unzip -q "$ZIP" -d _project
+          fi
+
+      - name: Locate Gradle project
+        id: locate
+        run: |
+          GRADLEW=$(find . -name gradlew -not -path "./.git/*" | head -n 1)
+          if [ -z "$GRADLEW" ]; then echo "gradlew not found"; exit 1; fi
+          DIR=$(dirname "$GRADLEW")
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "Gradle project: $DIR"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The runner already ships an Android SDK; use its sdkmanager directly.
+      - name: Install SDK platform, build-tools and NDK
+        run: |
+          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          SDKM="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-34" "build-tools;34.0.0" "ndk;24.0.8215888"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Build debug APK
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Verify native library is in the APK
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: |
+          APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          echo "APK: $APK"
+          unzip -l "$APK" | grep "lib/arm64-v8a/.*\.so" || { echo "No arm64-v8a .so in APK"; exit 1; }
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DragonEngine-debug-apk
+          path: ${{ steps.locate.outputs.dir }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          
