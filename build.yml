@@ -1,0 +1,83 @@
+name: Build CarromMod APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The Android SDK is already installed on ubuntu-latest, so no setup action is used. Only the
+      # licenses are accepted here, which lets AGP download the platform, build-tools and NDK itself.
+      - name: Accept Android SDK licenses
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SM=$(find "$SDK/cmdline-tools" -maxdepth 3 -name sdkmanager 2>/dev/null | sort | tail -n1)
+          echo "SDK=$SDK"
+          echo "sdkmanager=$SM"
+          if [ -z "$SM" ]; then echo "::error::sdkmanager not found under $SDK/cmdline-tools"; exit 1; fi
+          yes | "$SM" --sdk_root="$SDK" --licenses > /tmp/licenses.log 2>&1 || echo "sdkmanager exit code: $?"
+          tail -n 4 /tmp/licenses.log
+          ls "$SDK/licenses"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+
+      - name: Locate the Gradle project
+        id: loc
+        run: |
+          {
+            echo "### Repository layout (3 levels)"
+            echo '```'
+            find . -maxdepth 3 -not -path './.git' -not -path './.git/*' | sort | head -80
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          G=""
+          # A zip uploaded to the repository wins: it is unpacked and built.
+          Z=$(find . -maxdepth 2 -name '*.zip' -not -path './.git/*' | head -n1)
+          if [ -n "$Z" ]; then
+            echo "Unpacking $Z"
+            mkdir -p _unzipped && unzip -q -o "$Z" -d _unzipped
+            G=$(find _unzipped -maxdepth 4 -name gradlew | head -n1)
+          fi
+          # Otherwise (or if that zip has no gradlew) use a project that is already in the repo.
+          if [ -z "$G" ]; then
+            G=$(find . -maxdepth 5 -name gradlew -not -path './.git/*' -not -path './_unzipped/*' | head -n1)
+          fi
+          if [ -z "$G" ]; then
+            echo "::error::No gradlew found in the repository. See the layout on the summary page."
+            exit 1
+          fi
+          echo "dir=$(dirname "$G")" >> "$GITHUB_OUTPUT"
+
+      - name: Build debug APK
+        working-directory: ${{ steps.loc.outputs.dir }}
+        run: |
+          chmod +x gradlew
+          set -o pipefail
+          ./gradlew :app:assembleDebug --stacktrace 2>&1 | tee build.log
+
+      - name: Show the real errors on the run summary page
+        if: always() && steps.loc.outputs.dir != ''
+        working-directory: ${{ steps.loc.outputs.dir }}
+        run: |
+          grep -n -E "error:|fatal error|undefined reference|FAILED|What went wrong|No such file|Could not " build.log | head -80 > errors.txt || true
+          { echo "### Build errors (first 80 matches)"; echo '```'; cat errors.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: carrommod-build
+          if-no-files-found: warn
+          path: |
+            ${{ steps.loc.outputs.dir }}/app/build/outputs/apk/debug/*.apk
+            ${{ steps.loc.outputs.dir }}/build.log
+            ${{ steps.loc.outputs.dir }}/errors.txt
