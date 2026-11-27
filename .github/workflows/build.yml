@@ -23,9 +23,27 @@ jobs:
       - name: Locate the Gradle project
         id: loc
         run: |
-          G=$(find . -maxdepth 3 -name gradlew -not -path './.git/*' | head -n1)
+          {
+            echo "### Repository layout (3 levels)"
+            echo '```'
+            find . -maxdepth 3 -not -path './.git' -not -path './.git/*' | sort | head -80
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          G=""
+          # A zip uploaded to the repository wins: it is unpacked and built.
+          Z=$(find . -maxdepth 2 -name '*.zip' -not -path './.git/*' | head -n1)
+          if [ -n "$Z" ]; then
+            echo "Unpacking $Z"
+            mkdir -p _unzipped && unzip -q -o "$Z" -d _unzipped
+            G=$(find _unzipped -maxdepth 4 -name gradlew | head -n1)
+          fi
+          # Otherwise (or if that zip has no gradlew) use a project that is already in the repo.
           if [ -z "$G" ]; then
-            echo "No gradlew found. Repository layout:"; ls -R | head -60; exit 1
+            G=$(find . -maxdepth 5 -name gradlew -not -path './.git/*' -not -path './_unzipped/*' | head -n1)
+          fi
+          if [ -z "$G" ]; then
+            echo "::error::No gradlew found in the repository. See the layout on the summary page."
+            exit 1
           fi
           echo "dir=$(dirname "$G")" >> "$GITHUB_OUTPUT"
 
@@ -37,7 +55,7 @@ jobs:
           ./gradlew :app:assembleDebug --stacktrace 2>&1 | tee build.log
 
       - name: Show the real errors on the run summary page
-        if: always()
+        if: always() && steps.loc.outputs.dir != ''
         working-directory: ${{ steps.loc.outputs.dir }}
         run: |
           grep -n -E "error:|fatal error|undefined reference|FAILED|What went wrong|No such file|Could not " build.log | head -80 > errors.txt || true
